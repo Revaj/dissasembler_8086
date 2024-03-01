@@ -9,6 +9,7 @@ struct Instruction {
 	u8 opp;
 	u8 d;
 	u8 w;
+	u8 s;
 	u8 mod;
 	u8 regrm[2];
 };
@@ -16,6 +17,24 @@ struct Instruction {
 struct Register {
 	u8 bits;
 	char w_table[2][3];
+};
+
+struct Op {
+	u8 bits;
+	char str[4];
+};
+
+Op opps[] = {
+	{0b100010, "mov"},
+	{0b000000, "add"},
+	{0b000100, "adc"},
+	{0b001010, "sub"},
+	{0b000110, "sbb"},
+	{0b001110, "cmp"},
+};
+
+Op functions_ops[] = {
+	{0b100010, register_register}
 };
 
 struct EffectiveAddress {
@@ -50,6 +69,146 @@ char effective_addresses[][8] = {
 	"bx"      //0b111
 };
 
+void imm_register_memory(char *buffer_read, int *idx) {
+	inst.s = (buffer_read[0] & 0b00000010) >> 1;
+	inst.w = (buffer_read[0] & 0b00000001) >> 0;
+	inst.mod = (buffer_read[1] & 0b11000000) >> 6;
+	inst.opp = (buffer_read[1] & 0b00111000) >> 3;
+	inst.regrm[rm_idx] = (buffer_read[1] & 0b00000111) >> 0;
+	
+	Op opps_imm[] = {
+		{0b000, "add"},
+		{0b010, "adc"},
+		{0b101, "sub"},
+		{0b011, "sbb"},
+		{0b111, "cmp"},
+	};
+
+	printf("%s ", opps_imm[opcode]);
+	//calculate displacement
+	int displacement = 0;
+	int data = 0 ;
+	if (inst.mod == 0b00) {
+		data = buffer_read[2];
+		if (inst.w && inst.s == 0) {
+			data &= 0b11111111;
+			data |= buffer_read[3] << 8;
+		}
+	}
+	if (inst.mod == 0b01) {
+		displacement = buffer_read[2];
+		data = buffer_read[3];
+		if (inst.w && inst.s == 0) {
+			data &= 0b11111111;
+			data |= buffer_read[4] << 8;
+		}
+		idx += inst.mod;
+	}
+	else if (inst.mod == 0b10) {
+		displacement = buffer_read[2];
+		displacement &= 0b11111111;
+		displacement |= buffer_read[3] << 8;
+		data = buffer_read[4];
+		if (inst.w && inst.s == 0) {
+			data &= 0b11111111;
+			data |= buffer_read[5] << 8;
+		}
+		idx += inst.mod;
+	}
+
+	//Now print
+	if (inst.w) {
+		printf("word ");
+	}
+	else {
+		printf("byte ");
+	}
+	if (inst.mod == 0b00) {
+		printf("[%s],%d\n", effective_addresses[rm_idx], data);
+	}
+	else if (inst.mod == 0b01 || inst.mod & 0b10) {
+		printf("mov [%s + %d],%d\n", effective_addresses[rm_idx], displacement, data);
+	}
+	idx += 3 + inst.w;
+}
+
+void register_register(u8 opcode, char *buffer_read, int *idx) {
+	Instruction inst;
+	inst.d = (buffer_read[0] & 0b00000010) >> 1;
+	inst.w = (buffer_read[0] & 0b00000001) >> 0;
+	inst.mod = (buffer_read[1] & 0b11000000) >> 6;
+	inst.regrm[reg_idx] = (buffer_read[1] & 0b00111000) >> 3;
+	inst.regrm[rm_idx] = (buffer_read[1] & 0b00000111) >> 0;
+
+	printf("%s ", opps[opcode]);
+	if (inst.mod == 0b11) {
+		u8 regrm1 = inst.regrm[!inst.d];
+		u8 regrm2 = inst.regrm[inst.d];
+		printf("%s %s,%s\n",
+			opps[opcode],
+			registers[regrm1].w_table[inst.w],
+			registers[regrm2].w_table[inst.w]);
+			idx += 2;
+	}
+	else if (inst.mod == 0b00) {
+		if (inst.regrm[rm_idx] == 0b110) {
+			int displacement = buffer_read[2];
+			displacement &= 0b11111111;
+			displacement |= buffer_read[3] << 8;
+
+			if (inst.d) {
+				printf("%s,[%d]\n", registers[inst.regrm[reg_idx]].w_table[inst.w], displacement);
+			}
+			else {
+				printf("[%d],%s\n", displacement, registers[inst.regrm[reg_idx]].w_table[inst.w]);
+			}
+			idx += 4;
+		}
+		else {
+			if (inst.d) {
+				printf("%s,[%s]\n", registers[inst.regrm[reg_idx]].w_table[inst.w],
+					effective_addresses[inst.regrm[rm_idx]]);
+			}
+			else {
+				printf("[%s],%s\n",
+					effective_addresses[inst.regrm[rm_idx]], registers[inst.regrm[reg_idx]].w_table[inst.w]);
+			}
+			idx += 2;
+		}
+	}
+	else if (inst.mod == 0b01) {
+		int displacement = buffer_read[2];
+		if (inst.d) {
+			printf("%s,[%s + %d]\n", registers[inst.regrm[reg_idx]].w_table[inst.w],
+					effective_addresses[inst.regrm[rm_idx]],
+					displacement);
+		}
+		else {
+			printf("[%s + %d],%s\n",
+					effective_addresses[inst.regrm[rm_idx]],
+					displacement, registers[inst.regrm[reg_idx]].w_table[inst.w]);
+		}
+		idx += 3;
+	}
+	else if (inst.mod == 0b10) {
+		int displacement = buffer_read[2];
+		displacement &= 0b11111111;
+		displacement |= buffer_read[3] << 8;
+		if (inst.d) {
+			printf("%s,[%s + %d]\n", registers[inst.regrm[reg_idx]].w_table[inst.w],
+					effective_addresses[inst.regrm[rm_idx]],
+					displacement);
+		}
+		else {
+			printf("[%s + %d],%s\n",
+					effective_addresses[inst.regrm[rm_idx]],
+					displacement, registers[inst.regrm[reg_idx]].w_table[inst.w]);
+		}
+		idx += 4;
+	}
+}
+
+
 int main(int argc, char* argv[]) {
 	if (argc != 2) {
 		printf("./a.out <path_file>\n");
@@ -72,84 +231,17 @@ int main(int argc, char* argv[]) {
 		Instruction inst;
 		char* buffer_read = &buf[idx];
 
-		if (0b100010 == ((buffer_read[0] & 0b11111100) >> 2)) {
+		//Registers mov,add,sub
+		u8 opcode = ((buffer_read[0] & 0b11111100) >> 2);
+		if (0b100010 == opcode ||
+		    0b000000 == opcode ||
+			0b000100 == opcode ||
+			0b001010 == opcode ||
+			0b000110 == opcode ||
+			0b001110 == opcode) {
 			printf("register to register\n");
-			inst.d = (buffer_read[0] & 0b00000010) >> 1;
-			inst.w = (buffer_read[0] & 0b00000001) >> 0;
-			inst.mod = (buffer_read[1] & 0b11000000) >> 6;
-			inst.regrm[reg_idx] = (buffer_read[1] & 0b00111000) >> 3;
-			inst.regrm[rm_idx] = (buffer_read[1] & 0b00000111) >> 0;
-			if (inst.mod == 0b11) {
-				printf("mod %d\n", inst.mod);
-				u8 regrm1 = inst.regrm[!inst.d];
-				u8 regrm2 = inst.regrm[inst.d];
-				printf("mov %s,%s\n",
-					registers[regrm1].w_table[inst.w],
-					registers[regrm2].w_table[inst.w]);
-				idx += 2;
-				continue;
-			}
-			else if (inst.mod == 0b00) {
-				if (inst.regrm[rm_idx] == 0b110) {
-					int displacement = buffer_read[2];
-					displacement &= 0b11111111;
-					displacement |= buffer_read[3] << 8;
-
-					if (inst.d) {
-						printf("mov %s,[%d]\n", registers[inst.regrm[reg_idx]].w_table[inst.w], displacement);
-					}
-					else {
-						printf("mov [%d],%s\n", displacement, registers[inst.regrm[reg_idx]].w_table[inst.w]);
-					}
-					idx += 4;
-					continue;
-				}
-				else {
-					if (inst.d) {
-						printf("mov %s,[%s]\n", registers[inst.regrm[reg_idx]].w_table[inst.w],
-							effective_addresses[inst.regrm[rm_idx]]);
-					}
-					else {
-						printf("mov [%s],%s\n",
-							effective_addresses[inst.regrm[rm_idx]], registers[inst.regrm[reg_idx]].w_table[inst.w]);
-					}
-					idx += 2;
-					continue;
-				}
-			}
-			else if (inst.mod == 0b01) {
-				int displacement = buffer_read[2];
-				printf("hi");
-				if (inst.d) {
-					printf("mov %s,[%s + %d]\n", registers[inst.regrm[reg_idx]].w_table[inst.w],
-						effective_addresses[inst.regrm[rm_idx]],
-						displacement);
-				}
-				else {
-					printf("mov [%s + %d],%s\n",
-						effective_addresses[inst.regrm[rm_idx]],
-						displacement, registers[inst.regrm[reg_idx]].w_table[inst.w]);
-				}
-				idx += 3;
-				continue;
-			}
-			else if (inst.mod == 0b10) {
-				int displacement = buffer_read[2];
-				displacement &= 0b11111111;
-				displacement |= buffer_read[3] << 8;
-				if (inst.d) {
-					printf("mov %s,[%s + %d]\n", registers[inst.regrm[reg_idx]].w_table[inst.w],
-						effective_addresses[inst.regrm[rm_idx]],
-						displacement);
-				}
-				else {
-					printf("mov [%s + %d],%s\n",
-						effective_addresses[inst.regrm[rm_idx]],
-						displacement, registers[inst.regrm[reg_idx]].w_table[inst.w]);
-				}
-				idx += 4;
-				continue;
-			}
+			register_register(opcode, buffer_read, &idx);
+			continue;
 		}
 
 		if (0b1011 == ((buffer_read[0] & 0b11110000) >> 4)) {
@@ -173,7 +265,7 @@ int main(int argc, char* argv[]) {
 		}
 
 		if (0b1100011 == ((buffer_read[0] & 0b11111110) >> 1)) {
-			//inmediate to register/memory
+			//inmediate to register/memory in mov case
 			printf("immediate to register/memory\n");
 			inst.w = (buffer_read[0] & 0b00000001) >> 0;
 			inst.mod = (buffer_read[1] & 0b11000000) >> 6;
@@ -225,6 +317,13 @@ int main(int argc, char* argv[]) {
 				printf("byte %d\n", data);
 			}
 			idx += 3 + inst.w;
+			continue;
+		}
+
+		if (0b100000 == opcode) {
+			//similar case but for add,sub and similars
+			printf("immediate to register/memory\n");
+			imm_register_memory(opcode, buffer_read, &idx);
 			continue;
 		}
 
